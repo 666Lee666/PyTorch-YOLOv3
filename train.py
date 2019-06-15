@@ -1,13 +1,13 @@
 from __future__ import division
 
 from models import *
-from utils.logger import *
+# from utils.logger import *
 from utils.utils import *
 from utils.datasets import *
 from utils.parse_config import *
 from test import evaluate
 
-from terminaltables import AsciiTable
+# from terminaltables import AsciiTable
 
 import os
 import sys
@@ -39,12 +39,12 @@ if __name__ == "__main__":
     opt = parser.parse_args()
     print(opt)
 
-    logger = Logger("logs")
+    # logger = Logger("logs")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    os.makedirs("output", exist_ok=True)
-    os.makedirs("checkpoints", exist_ok=True)
+    # os.makedirs("output", exist_ok=True)
+    # os.makedirs("checkpoints", exist_ok=True)
 
     # Get data configuration
     data_config = parse_data_config(opt.data_config)
@@ -62,6 +62,8 @@ if __name__ == "__main__":
             model.load_state_dict(torch.load(opt.pretrained_weights))
         else:
             model.load_darknet_weights(opt.pretrained_weights)
+
+    # model = torch.nn.DataParallel(model).cuda()
 
     # Get dataloader
     dataset = ListDataset(train_path, augment=True, multiscale=opt.multiscale_training)
@@ -96,9 +98,10 @@ if __name__ == "__main__":
     for epoch in range(opt.epochs):
         model.train()
         start_time = time.time()
-        for batch_i, (_, imgs, targets) in enumerate(dataloader):
+        for batch_i, (img_pth, imgs, targets) in enumerate(dataloader):
             batches_done = len(dataloader) * epoch + batch_i
-
+            # img: (batch_size, channel, height, width)
+            # target: (num, 6)  6=>(batch_index, cls, center_x, center_y, widht, height)
             imgs = Variable(imgs.to(device))
             targets = Variable(targets.to(device), requires_grad=False)
 
@@ -116,7 +119,7 @@ if __name__ == "__main__":
 
             log_str = "\n---- [Epoch %d/%d, Batch %d/%d] ----\n" % (epoch, opt.epochs, batch_i, len(dataloader))
 
-            metric_table = [["Metrics", *[f"YOLO Layer {i}" for i in range(len(model.yolo_layers))]]]
+            # metric_table = [["Metrics", *["YOLO Layer {}".format(i) for i in range(len(model.yolo_layers))]]]
 
             # Log metrics at each YOLO layer
             for i, metric in enumerate(metrics):
@@ -124,28 +127,31 @@ if __name__ == "__main__":
                 formats["grid_size"] = "%2d"
                 formats["cls_acc"] = "%.2f%%"
                 row_metrics = [formats[metric] % yolo.metrics.get(metric, 0) for yolo in model.yolo_layers]
-                metric_table += [[metric, *row_metrics]]
+                # metric_table += [[metric, *row_metrics]]
 
                 # Tensorboard logging
                 tensorboard_log = []
                 for j, yolo in enumerate(model.yolo_layers):
                     for name, metric in yolo.metrics.items():
                         if name != "grid_size":
-                            tensorboard_log += [(f"{name}_{j+1}", metric)]
+                            tensorboard_log += [("{}_{}".format(name, j+1), metric)]
                 tensorboard_log += [("loss", loss.item())]
-                logger.list_of_scalars_summary(tensorboard_log, batches_done)
+                # logger.list_of_scalars_summary(tensorboard_log, batches_done)
 
-            log_str += AsciiTable(metric_table).table
-            log_str += f"\nTotal loss {loss.item()}"
+            # log_str += AsciiTable(metric_table).table
+            log_str += "\nTotal loss {}".format(loss.item())
 
             # Determine approximate time left for epoch
             epoch_batches_left = len(dataloader) - (batch_i + 1)
             time_left = datetime.timedelta(seconds=epoch_batches_left * (time.time() - start_time) / (batch_i + 1))
-            log_str += f"\n---- ETA {time_left}"
+            log_str += "\n---- ETA {}".format(time_left)
 
             print(log_str)
 
             model.seen += imgs.size(0)
+
+            # if batch_i > 10:
+            #     break
 
         if epoch % opt.evaluation_interval == 0:
             print("\n---- Evaluating Model ----")
@@ -165,14 +171,14 @@ if __name__ == "__main__":
                 ("val_mAP", AP.mean()),
                 ("val_f1", f1.mean()),
             ]
-            logger.list_of_scalars_summary(evaluation_metrics, epoch)
+            # logger.list_of_scalars_summary(evaluation_metrics, epoch)
 
             # Print class APs and mAP
             ap_table = [["Index", "Class name", "AP"]]
             for i, c in enumerate(ap_class):
                 ap_table += [[c, class_names[c], "%.5f" % AP[i]]]
-            print(AsciiTable(ap_table).table)
-            print(f"---- mAP {AP.mean()}")
+            # print(AsciiTable(ap_table).table)
+            print("---- mAP {}".format(AP.mean()))
 
         if epoch % opt.checkpoint_interval == 0:
-            torch.save(model.state_dict(), f"checkpoints/yolov3_ckpt_%d.pth" % epoch)
+            torch.save(model.state_dict(), "checkpoints/yolov3_ckpt_%d.pth" % epoch)

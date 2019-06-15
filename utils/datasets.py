@@ -4,13 +4,15 @@ import os
 import sys
 import numpy as np
 from PIL import Image
+from PIL import ImageFile
 import torch
 import torch.nn.functional as F
 
-from utils.augmentations import horisontal_flip
+from augmentations import horisontal_flip
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
 
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def pad_to_square(img, pad_value):
     c, h, w = img.shape
@@ -106,6 +108,7 @@ class ListDataset(Dataset):
         if os.path.exists(label_path):
             boxes = torch.from_numpy(np.loadtxt(label_path).reshape(-1, 5))
             # Extract coordinates for unpadded + unscaled image
+            # label: (center_x, center_y, width, height)
             x1 = w_factor * (boxes[:, 1] - boxes[:, 3] / 2)
             y1 = h_factor * (boxes[:, 2] - boxes[:, 4] / 2)
             x2 = w_factor * (boxes[:, 1] + boxes[:, 3] / 2)
@@ -116,11 +119,16 @@ class ListDataset(Dataset):
             x2 += pad[1]
             y2 += pad[3]
             # Returns (x, y, w, h)
+            # print boxes
+            # print w_factor, h_factor, padded_w, padded_h
             boxes[:, 1] = ((x1 + x2) / 2) / padded_w
             boxes[:, 2] = ((y1 + y2) / 2) / padded_h
-            boxes[:, 3] *= w_factor / padded_w
-            boxes[:, 4] *= h_factor / padded_h
+            # boxes[:, 3] *= w_factor / padded_w
+            # boxes[:, 4] *= h_factor / padded_h
+            boxes[:, 3] = boxes[:, 3] * w_factor / padded_w
+            boxes[:, 4] = boxes[:, 4] * h_factor / padded_h
 
+            # print boxes
             targets = torch.zeros((len(boxes), 6))
             targets[:, 1:] = boxes
 

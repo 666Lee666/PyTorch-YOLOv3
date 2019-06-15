@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import division
 
 import torch
@@ -9,8 +10,8 @@ import numpy as np
 from utils.parse_config import *
 from utils.utils import build_targets, to_cpu, non_max_suppression
 
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+# import matplotlib.pyplot as plt
+# import matplotlib.patches as patches
 
 
 def create_modules(module_defs):
@@ -29,7 +30,7 @@ def create_modules(module_defs):
             kernel_size = int(module_def["size"])
             pad = (kernel_size - 1) // 2
             modules.add_module(
-                f"conv_{module_i}",
+                "conv_{}".format(module_i),
                 nn.Conv2d(
                     in_channels=output_filters[-1],
                     out_channels=filters,
@@ -40,30 +41,30 @@ def create_modules(module_defs):
                 ),
             )
             if bn:
-                modules.add_module(f"batch_norm_{module_i}", nn.BatchNorm2d(filters, momentum=0.9, eps=1e-5))
+                modules.add_module("batch_norm_{}".format(module_i), nn.BatchNorm2d(filters, momentum=0.9, eps=1e-5))
             if module_def["activation"] == "leaky":
-                modules.add_module(f"leaky_{module_i}", nn.LeakyReLU(0.1))
+                modules.add_module("leaky_{}".format(module_i), nn.LeakyReLU(0.1))
 
         elif module_def["type"] == "maxpool":
             kernel_size = int(module_def["size"])
             stride = int(module_def["stride"])
             if kernel_size == 2 and stride == 1:
-                modules.add_module(f"_debug_padding_{module_i}", nn.ZeroPad2d((0, 1, 0, 1)))
+                modules.add_module("_debug_padding_{}".format(module_i), nn.ZeroPad2d((0, 1, 0, 1)))
             maxpool = nn.MaxPool2d(kernel_size=kernel_size, stride=stride, padding=int((kernel_size - 1) // 2))
-            modules.add_module(f"maxpool_{module_i}", maxpool)
+            modules.add_module("maxpool_{}".format(module_i), maxpool)
 
         elif module_def["type"] == "upsample":
             upsample = Upsample(scale_factor=int(module_def["stride"]), mode="nearest")
-            modules.add_module(f"upsample_{module_i}", upsample)
+            modules.add_module("upsample_{}".format(module_i), upsample)
 
         elif module_def["type"] == "route":
             layers = [int(x) for x in module_def["layers"].split(",")]
             filters = sum([output_filters[1:][i] for i in layers])
-            modules.add_module(f"route_{module_i}", EmptyLayer())
+            modules.add_module("route_{}".format(module_i), EmptyLayer())
 
         elif module_def["type"] == "shortcut":
             filters = output_filters[1:][int(module_def["from"])]
-            modules.add_module(f"shortcut_{module_i}", EmptyLayer())
+            modules.add_module("shortcut_{}".format(module_i), EmptyLayer())
 
         elif module_def["type"] == "yolo":
             anchor_idxs = [int(x) for x in module_def["mask"].split(",")]
@@ -75,7 +76,7 @@ def create_modules(module_defs):
             img_size = int(hyperparams["height"])
             # Define detection layer
             yolo_layer = YOLOLayer(anchors, num_classes, img_size)
-            modules.add_module(f"yolo_{module_i}", yolo_layer)
+            modules.add_module("yolo_{}".format(module_i), yolo_layer)
         # Register module list and number of output filters
         module_list.append(modules)
         output_filters.append(filters)
@@ -124,13 +125,18 @@ class YOLOLayer(nn.Module):
         self.grid_size = grid_size
         g = self.grid_size
         FloatTensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
-        self.stride = self.img_dim / self.grid_size
+        self.stride = self.img_dim / self.grid_size  # 缩小多少倍
         # Calculate offsets for each grid
+        # grid_x， grid_y（1, 1, gride, gride）
         self.grid_x = torch.arange(g).repeat(g, 1).view([1, 1, g, g]).type(FloatTensor)
         self.grid_y = torch.arange(g).repeat(g, 1).t().view([1, 1, g, g]).type(FloatTensor)
+
+        # 图片缩小多少倍，对应的anchors也要缩小相应倍数
         self.scaled_anchors = FloatTensor([(a_w / self.stride, a_h / self.stride) for a_w, a_h in self.anchors])
-        self.anchor_w = self.scaled_anchors[:, 0:1].view((1, self.num_anchors, 1, 1))
-        self.anchor_h = self.scaled_anchors[:, 1:2].view((1, self.num_anchors, 1, 1))
+
+        # scaled_anchors shape（3， 2），3个anchors，每个anchor有w,h两个量。下面步骤是把这两个量划分开
+        self.anchor_w = self.scaled_anchors[:, 0:1].view((1, self.num_anchors, 1, 1))  # （1， 3， 1， 1）
+        self.anchor_h = self.scaled_anchors[:, 1:2].view((1, self.num_anchors, 1, 1))  # （1， 3， 1， 1）
 
     def forward(self, x, targets=None, img_dim=None):
 
@@ -139,39 +145,50 @@ class YOLOLayer(nn.Module):
         LongTensor = torch.cuda.LongTensor if x.is_cuda else torch.LongTensor
         ByteTensor = torch.cuda.ByteTensor if x.is_cuda else torch.ByteTensor
 
-        self.img_dim = img_dim
-        num_samples = x.size(0)
-        grid_size = x.size(2)
+        self.img_dim = img_dim  # (img_size)
+        num_samples = x.size(0)  # (img_batch)
+        grid_size = x.size(2)  # (feature_map_size)
+        # print x.shape  # (batch_size, 255, grid_size, grid_size)
 
         prediction = (
-            x.view(num_samples, self.num_anchors, self.num_classes + 5, grid_size, grid_size)
+            x.view(num_samples, self.num_anchors, 5 + self.num_classes, grid_size, grid_size)
             .permute(0, 1, 3, 4, 2)
             .contiguous()
         )
+        # print prediction.shape (batch_size, num_anchors, grid_size, grid_size, 85)
 
         # Get outputs
+        # 这里的prediction是初步的所有预测，在grid_size*grid_size个网格中，它表示每个网格都会有num_anchor（3）个anchor框
+        # x,y,w,h, pred_conf的shape都是一样的 (batch_size, num_anchor, gride_size, grid_size)
         x = torch.sigmoid(prediction[..., 0])  # Center x
         y = torch.sigmoid(prediction[..., 1])  # Center y
         w = prediction[..., 2]  # Width
         h = prediction[..., 3]  # Height
         pred_conf = torch.sigmoid(prediction[..., 4])  # Conf
-        pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred.
+        pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred. (batch_size, num_anchor, gride_size, grid_size, cls)
 
         # If grid size does not match current we compute new offsets
+        # print grid_size, self.grid_size
         if grid_size != self.grid_size:
             self.compute_grid_offsets(grid_size, cuda=x.is_cuda)
 
+        # print self.grid_x, self.grid_y, self.anchor_w, self.anchor_h
         # Add offset and scale with anchors
         pred_boxes = FloatTensor(prediction[..., :4].shape)
-        pred_boxes[..., 0] = x.data + self.grid_x
+        # 针对每个网格的偏移量，每个网格的单位长度为1，而预测的中心点（x，y）是归一化的（0，1之间），所以可以直接相加
+        pred_boxes[..., 0] = x.data + self.grid_x  # （1, 1, gride, gride）
         pred_boxes[..., 1] = y.data + self.grid_y
-        pred_boxes[..., 2] = torch.exp(w.data) * self.anchor_w
+        pred_boxes[..., 2] = torch.exp(w.data) * self.anchor_w  # # （1， 3， 1， 1）
         pred_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
 
+        # (batch_size, num_anchors*grid_size*grid_size, 85)
         output = torch.cat(
             (
-                pred_boxes.view(num_samples, -1, 4) * self.stride,
+                # (batch_size, num_anchors*grid_size*grid_size, 4)
+                pred_boxes.view(num_samples, -1, 4) * self.stride,  # 放大到最初输入的尺寸
+                # (batch_size, num_anchors*grid_size*grid_size, 1)
                 pred_conf.view(num_samples, -1, 1),
+                # (batch_size, num_anchors*grid_size*grid_size, 80)
                 pred_cls.view(num_samples, -1, self.num_classes),
             ),
             -1,
@@ -180,6 +197,11 @@ class YOLOLayer(nn.Module):
         if targets is None:
             return output, 0
         else:
+            # pred_boxes => (batch_size, anchor_num, gride, gride, 4)
+            # pred_cls => (batch_size, anchor_num, gride, gride, 80)
+            # targets => (num, 6)  6=>(batch_index, cls, center_x, center_y, widht, height)
+            # scaled_anchors => (3, 2)
+            # print pred_boxes.shape, pred_cls.shape, targets.shape, self.scaled_anchors.shape
             iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, tconf = build_targets(
                 pred_boxes=pred_boxes,
                 pred_cls=pred_cls,
@@ -187,16 +209,34 @@ class YOLOLayer(nn.Module):
                 anchors=self.scaled_anchors,
                 ignore_thres=self.ignore_thres,
             )
+            # iou_scores：预测框pred_boxes中的正确框与目标实体框target_boxes的交集IOU，以IOU作为分数，IOU越大，分值越高。
+            # class_mask：将预测正确的标记为1（正确的预测了实体中心点所在的网格坐标，哪个anchor框可以最匹配实体，以及实体的类别）
+            # obj_mask：将目标实体框所对应的anchor标记为1，目标实体框所对应的anchor与实体一一对应的
+            # noobj_mask：将所有与目标实体框IOU小于某一阈值的anchor标记为1
+            # tx, ty, tw, th： 需要拟合目标实体框的坐标和尺寸
+            # tcls：目标实体框的所属类别
+            # tconf：所有anchor的目标置信度
+
+            # 这里计算得到的iou_scores，class_mask，obj_mask，noobj_mask，tx, ty, tw, th和tconf都是（batch, anchor_num, gride, gride）
+            # 预测的x,y,w,h,pred_conf也都是（batch, anchor_num, gride, gride）
+
+            # tcls 和 pred_cls 都是（batch, anchor_num, gride, gride，num_class）
+
 
             # Loss : Mask outputs to ignore non-existing objects (except with conf. loss)
+            # 坐标和尺寸的loss计算：
             loss_x = self.mse_loss(x[obj_mask], tx[obj_mask])
             loss_y = self.mse_loss(y[obj_mask], ty[obj_mask])
             loss_w = self.mse_loss(w[obj_mask], tw[obj_mask])
             loss_h = self.mse_loss(h[obj_mask], th[obj_mask])
-            loss_conf_obj = self.bce_loss(pred_conf[obj_mask], tconf[obj_mask])
-            loss_conf_noobj = self.bce_loss(pred_conf[noobj_mask], tconf[noobj_mask])
+            # anchor置信度的loss计算：
+            loss_conf_obj = self.bce_loss(pred_conf[obj_mask], tconf[obj_mask])  # tconf[obj_mask] 全为1
+            loss_conf_noobj = self.bce_loss(pred_conf[noobj_mask], tconf[noobj_mask])  # tconf[noobj_mask] 全为0
             loss_conf = self.obj_scale * loss_conf_obj + self.noobj_scale * loss_conf_noobj
+            # 类别的loss计算
             loss_cls = self.bce_loss(pred_cls[obj_mask], tcls[obj_mask])
+
+            # loss汇总
             total_loss = loss_x + loss_y + loss_w + loss_h + loss_conf + loss_cls
 
             # Metrics
@@ -207,6 +247,12 @@ class YOLOLayer(nn.Module):
             iou50 = (iou_scores > 0.5).float()
             iou75 = (iou_scores > 0.75).float()
             detected_mask = conf50 * class_mask * tconf
+
+            obj_mask = obj_mask.float()
+
+            # print type(iou50), type(detected_mask), type(conf50.sum()), type(iou75), type(obj_mask)
+            #
+            # print iou50.dtype, detected_mask.dtype, conf50.sum().dtype, iou75.dtype, obj_mask.dtype
             precision = torch.sum(iou50 * detected_mask) / (conf50.sum() + 1e-16)
             recall50 = torch.sum(iou50 * detected_mask) / (obj_mask.sum() + 1e-16)
             recall75 = torch.sum(iou75 * detected_mask) / (obj_mask.sum() + 1e-16)
